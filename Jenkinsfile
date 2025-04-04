@@ -1,110 +1,97 @@
 pipeline {
     agent any
-
+    
     environment {
-        AWS_DOCKER_REGISTRY = '612634926349.dkr.ecr.us-east-2.amazonaws.com'
-        APP_NAME = 'my_new_image'
-        AWS_DEFAULT_REGION = 'us-east-2'
-        S3_BUCKET_NAME = 'matheusnevesjenkinsreact'
+        S3_BUCKET_NAME = 'matheusnevesjenkinsreact' // Substitua pelo nome real do seu bucket
+        AWS_REGION = 'us-east-2'             // Mantenha a mesma região
     }
     
     stages {
-        stage('Build') {
-            agent {
-                docker {
-                    image 'node:22-alpine'
-                    reuseNode true
-                }
-            }
+        stage('Checkout') {
             steps {
-                sh '''
-                    # list all files
-                    ls -la
-                    node --version
-                    npm --version
-                    # npm install
-                    npm ci
-                    npm run build
-                    ls -la
-                '''
+                checkout scm
             }
         }
-
-        stage('Test') {
-            agent {
-                docker {
-                    image 'node:22-alpine'
-                    reuseNode true
-                }
-            }
+        
+        stage('Setup') {
             steps {
                 sh '''
-                    test -f build/index.html
-                    npm test
+                    apt-get update || true
+                    apt-get install -y nodejs npm curl openssl python3-pip || true
+                    npm -v
+                    node -v
+                    pip3 install awscli || true
+                    aws --version || true
                 '''
             }
         }
         
-        // Novo estágio para fazer upload no S3
-        stage('Deploy to S3') {
-            agent {
-                docker {
-                    image 'amazon/aws-cli'
-                    reuseNode true
-                }
+        stage('Build') {
+            steps {
+                sh '''
+                    npm install
+                    npm run build
+                '''
             }
+        }
+        
+        stage('Upload to S3') {
             steps {
                 withCredentials([usernamePassword(credentialsId: 'aws-s3-credentials', 
-                                             passwordVariable: 'AWS_SECRET_ACCESS_KEY', 
-                                             usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
+                                               passwordVariable: 'AWS_SECRET_ACCESS_KEY', 
+                                               usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
                     sh '''
-                        # Sincronizar os arquivos de build com o bucket S3
-                        aws s3 sync build/ s3://${S3_BUCKET_NAME}/ --delete
+                        # Data atual para a assinatura
+                        DATE=$(date -u +"%a, %d %b %Y %H:%M:%S GMT")
                         
-                        # Configurando o bucket para hospedagem web (opcional)
-                        aws s3 website s3://${S3_BUCKET_NAME}/ --index-document index.html --error-document index.html
+                        # Upload usando curl
+                        upload_file() {
+                            FILE_PATH=$1
+                            CONTENT_TYPE=$2
+                            
+                            STRING_TO_SIGN="PUT\\n\\n${CONTENT_TYPE}\\n${DATE}\\n/${S3_BUCKET_NAME}/${FILE_PATH}"
+                            SIGNATURE=$(echo -en "${STRING_TO_SIGN}" | openssl sha1 -hmac "${AWS_SECRET_ACCESS_KEY}" -binary | base64)
+                            
+                            curl -X PUT -T "build/${FILE_PATH}" \\
+                                -H "Host: ${S3_BUCKET_NAME}.s3.amazonaws.com" \\
+                                -H "Date: ${DATE}" \\
+                                -H "Content-Type: ${CONTENT_TYPE}" \\
+                                -H "Authorization: AWS ${AWS_ACCESS_KEY_ID}:${SIGNATURE}" \\
+                                "https://${S3_BUCKET_NAME}.s3.amazonaws.com/${FILE_PATH}"
+                                
+                            echo "Uploaded: ${FILE_PATH}"
+                        }
                         
-                        echo "Site disponível em: http://${S3_BUCKET_NAME}.s3-website-${AWS_DEFAULT_REGION}.amazonaws.com/"
-                    '''
-                }
-            }
-        }
-
-        stage('Build My Docker Image'){
-            agent{
-                docker{
-                    image 'amazon/aws-cli'
-                    reuseNode true
-                    args '-u root -v /var/run/docker.sock:/var/run/docker.sock --entrypoint=""'
-                }
-            }
-            steps{
-                withCredentials([usernamePassword(credentialsId: 'myNewUser', passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
-                    sh '''
-                        amazon-linux-extras install docker
-                        docker build -t $AWS_DOCKER_REGISTRY/$APP_NAME .
-                        aws ecr get-login-password | docker login --username AWS --password-stdin $AWS_DOCKER_REGISTRY
-                        docker push $AWS_DOCKER_REGISTRY/$APP_NAME:latest
-                    '''
-                }
-            }
-        }
-
-        stage('Deploy to AWS'){
-            agent{
-                docker{
-                    image 'amazon/aws-cli'
-                    reuseNode true
-                    args '-u root --entrypoint=""'
-                }
-            }
-            steps{
-                withCredentials([usernamePassword(credentialsId: 'myNewUser', passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
-                    sh '''
-                        aws --version
-                        yum install jq -y
-                        LATEST_TD_REVISION=$(aws ecs register-task-definition --cli-input-json file://aws/task-definition.json | jq '.taskDefinition.revision')
-                        aws ecs update-service --cluster my-new-react-app-Cluster-Prod --service my-new-react-app-Service-Prod --task-definition MyNewReactApp-TaskDefinition-Prod:$LATEST_TD_REVISION
+                        # Verificar se a pasta build existe
+                        if [ ! -d "build" ]; then
+                            echo "ERROR: pasta build não encontrada!"
+                            exit 1
+                        fi
+                        
+                        # Listar arquivos na pasta build
+                        echo "Arquivos na pasta build:"
+                        ls -la build/
+                        
+                        # Fazer upload de arquivos principais manualmente
+                        echo "Fazendo upload de arquivos principais..."
+                        upload_file "index.html" "text/html"
+                        
+                        # Localizar e fazer upload de arquivos js
+                        echo "Fazendo upload de arquivos JS..."
+                        find build -name "*.js" | while read file; do
+                            rel_path=$(echo "$file" | sed 's|build/||')
+                            upload_file "$rel_path" "application/javascript"
+                        done
+                        
+                        # Localizar e fazer upload de arquivos css
+                        echo "Fazendo upload de arquivos CSS..."
+                        find build -name "*.css" | while read file; do
+                            rel_path=$(echo "$file" | sed 's|build/||')
+                            upload_file "$rel_path" "text/css"
+                        done
+                        
+                        echo "Upload completo!"
+                        echo "Site disponível em: http://${S3_BUCKET_NAME}.s3-website-${AWS_REGION}.amazonaws.com/"
                     '''
                 }
             }
