@@ -48,19 +48,19 @@ pipeline {
                         upload_file() {
                             FILE_PATH=$1
                             CONTENT_TYPE=$2
-                            
+    
                             STRING_TO_SIGN="PUT\\n\\n${CONTENT_TYPE}\\n${DATE}\\n/${S3_BUCKET_NAME}/${FILE_PATH}"
                             SIGNATURE=$(echo -en "${STRING_TO_SIGN}" | openssl sha1 -hmac "${AWS_SECRET_ACCESS_KEY}" -binary | base64)
-                            
+    
                             curl -X PUT -T "build/${FILE_PATH}" \\
-                                -H "Host: ${S3_BUCKET_NAME}.s3.amazonaws.com" \\
+                                -H "Host: ${S3_BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com" \\
                                 -H "Date: ${DATE}" \\
                                 -H "Content-Type: ${CONTENT_TYPE}" \\
                                 -H "Authorization: AWS ${AWS_ACCESS_KEY_ID}:${SIGNATURE}" \\
-                                "https://${S3_BUCKET_NAME}.s3.amazonaws.com/${FILE_PATH}"
+                                "https://${S3_BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${FILE_PATH}"
                                 
                             echo "Uploaded: ${FILE_PATH}"
-                        }
+}
                         
                         # Verificar se a pasta build existe
                         if [ ! -d "build" ]; then
@@ -91,7 +91,7 @@ pipeline {
                         done
                         
                         echo "Upload completo!"
-                        echo "Site disponível em: http://${S3_BUCKET_NAME}.s3-website-${AWS_REGION}.amazonaws.com/"
+                        echo "Site disponível em: http://${S3_BUCKET_NAME}.s3-website.${AWS_REGION}.amazonaws.com/"
                     '''
                 }
             }
